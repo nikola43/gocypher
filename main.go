@@ -14,9 +14,31 @@ func main() {
 	maxCPUs := runtime.NumCPU()
 	runtime.GOMAXPROCS(maxCPUs)
 
+	// Encrypt and decrypt data
+	c := cypher.NewCypher("my-secret-key")
+
+	// Encrypt data
+	encrypted, err := c.Encrypt([]byte("your data"))
+	if err != nil {
+		panic(err)
+	}
+
+	// Decrypt data
+	decrypted, err := c.Decrypt(encrypted)
+	if err != nil {
+		panic(err)
+	}
+	
+	if string(decrypted) == "your data" {
+		fmt.Println("Success: Encrypted and decrypted data match!")
+	} else {
+		fmt.Println("Error: Encrypted and decrypted data do not match!")
+	}
+
+
 	inputFile := "./data/file.txt"
 
-	c := cypher.NewCypher("my-secret-key")
+
 
 	// Get original file hash
 	inputHash, err := cypher.MD5HashFromFile(inputFile)

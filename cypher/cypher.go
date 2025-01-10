@@ -333,3 +333,186 @@ func MD5HashFromString(str string) string {
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
+
+func (c Cypher) Encrypt(data []byte) ([]byte, error) {
+	block, err := aes.NewCipher(c.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create channels
+	rawChunks := make(chan DataChunk, NumWorkers)
+	encryptedChunks := make(chan DataChunk, NumWorkers)
+	errorChan := make(chan error, 1)
+
+	// Start the worker pool
+	var wg sync.WaitGroup
+	for i := 0; i < NumWorkers; i++ {
+		wg.Add(1)
+		go encryptWorker(ctx, &wg, gcm, rawChunks, encryptedChunks, errorChan)
+	}
+
+	// Start collecting results
+	var result []byte
+	var pendingChunks sync.Map
+	var nextPosition int
+	var resultMutex sync.Mutex
+
+	// Start collector goroutine
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for chunk := range encryptedChunks {
+			pendingChunks.Store(chunk.position, chunk.data)
+			
+			// Try to append chunks in order
+			for {
+				if data, ok := pendingChunks.LoadAndDelete(nextPosition); ok {
+					resultMutex.Lock()
+					result = append(result, data.([]byte)...)
+					resultMutex.Unlock()
+					nextPosition++
+				} else {
+					break
+				}
+			}
+		}
+	}()
+
+	// Split data into chunks and send for encryption
+	for i := 0; i < len(data); i += ChunkSize {
+		end := i + ChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		chunk := make([]byte, end-i)
+		copy(chunk, data[i:end])
+
+		select {
+		case rawChunks <- DataChunk{data: chunk, position: i / ChunkSize}:
+		case err := <-errorChan:
+			cancel()
+			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Close input channel and wait for workers
+	close(rawChunks)
+	wg.Wait()
+	close(encryptedChunks)
+
+	// Wait for collector
+	<-collectorDone
+
+	// Check for errors
+	select {
+	case err := <-errorChan:
+		return nil, err
+	default:
+		return result, nil
+	}
+}
+
+func (c Cypher) Decrypt(data []byte) ([]byte, error) {
+	block, err := aes.NewCipher(c.Key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Calculate chunk size for encrypted data
+	encryptedChunkSize := ChunkSize + gcm.NonceSize() + gcm.Overhead()
+
+	// Create channels
+	encryptedChunks := make(chan DataChunk, NumWorkers)
+	decryptedChunks := make(chan DataChunk, NumWorkers)
+	errorChan := make(chan error, 1)
+
+	// Start the worker pool
+	var wg sync.WaitGroup
+	for i := 0; i < NumWorkers; i++ {
+		wg.Add(1)
+		go decryptWorker(ctx, &wg, gcm, encryptedChunks, decryptedChunks, errorChan)
+	}
+
+	// Start collecting results
+	var result []byte
+	var pendingChunks sync.Map
+	var nextPosition int
+	var resultMutex sync.Mutex
+
+	// Start collector goroutine
+	collectorDone := make(chan struct{})
+	go func() {
+		defer close(collectorDone)
+		for chunk := range decryptedChunks {
+			pendingChunks.Store(chunk.position, chunk.data)
+			
+			// Try to append chunks in order
+			for {
+				if data, ok := pendingChunks.LoadAndDelete(nextPosition); ok {
+					resultMutex.Lock()
+					result = append(result, data.([]byte)...)
+					resultMutex.Unlock()
+					nextPosition++
+				} else {
+					break
+				}
+			}
+		}
+	}()
+
+	// Split data into chunks and send for decryption
+	for i := 0; i < len(data); i += encryptedChunkSize {
+		end := i + encryptedChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		chunk := make([]byte, end-i)
+		copy(chunk, data[i:end])
+
+		select {
+		case encryptedChunks <- DataChunk{data: chunk, position: i / encryptedChunkSize}:
+		case err := <-errorChan:
+			cancel()
+			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Close input channel and wait for workers
+	close(encryptedChunks)
+	wg.Wait()
+	close(decryptedChunks)
+
+	// Wait for collector
+	<-collectorDone
+
+	// Check for errors
+	select {
+	case err := <-errorChan:
+		return nil, err
+	default:
+		return result, nil
+	}
+}
