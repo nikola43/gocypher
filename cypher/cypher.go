@@ -11,12 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sync"
-)
-
-const (
-	ChunkSize  = 10 * 1024 * 1024 // 1KB
-	NumWorkers = 10               // Number of worker goroutines
 )
 
 type DataChunk struct {
@@ -25,11 +21,52 @@ type DataChunk struct {
 }
 
 type Cypher struct {
-	Key []byte
+	key        []byte
+	ChunkSize  int
+	NumWorkers int
+	NumCores   int
+}
+type Option func(*Cypher)
+
+func NewCypher(key string, opts ...Option) *Cypher {
+	maxCPUs := runtime.NumCPU()
+	runtime.GOMAXPROCS(maxCPUs)
+
+	// Default values
+	cypher := &Cypher{
+		ChunkSize:  10 * 1024 * 1024, // 10MB
+		NumWorkers: 10,               // 10 workers
+		key:        []byte(MD5HashFromString(key)),
+		NumCores:   maxCPUs,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(cypher)
+	}
+
+	return cypher
 }
 
-func NewCypher(key string) *Cypher {
-	return &Cypher{Key: []byte(MD5HashFromString(key))}
+func (c *Cypher) WithNumCores(numCores int) *Cypher {
+	maxCPUs := runtime.NumCPU()
+
+	if numCores > maxCPUs {
+		numCores = maxCPUs
+	}
+
+	c.NumCores = numCores
+	return c
+}
+
+func (c *Cypher) WithChunkSize(chunkSize int) *Cypher {
+	c.ChunkSize = chunkSize
+	return c
+}
+
+func (c *Cypher) WithNumWorkers(numWorkers int) *Cypher {
+	c.NumWorkers = numWorkers
+	return c
 }
 
 func (c Cypher) EncryptFile(inputPath string) (*string, error) {
@@ -46,7 +83,7 @@ func (c Cypher) EncryptFile(inputPath string) (*string, error) {
 	}
 	defer outputFile.Close()
 
-	block, err := aes.NewCipher(c.Key)
+	block, err := aes.NewCipher(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -60,13 +97,13 @@ func (c Cypher) EncryptFile(inputPath string) (*string, error) {
 	defer cancel()
 
 	// Create channels
-	rawChunks := make(chan DataChunk, NumWorkers)
-	encryptedChunks := make(chan DataChunk, NumWorkers)
+	rawChunks := make(chan DataChunk, c.NumWorkers)
+	encryptedChunks := make(chan DataChunk, c.NumWorkers)
 	errorChan := make(chan error, 1)
 
 	// Start the worker pool
 	var wg sync.WaitGroup
-	for i := 0; i < NumWorkers; i++ {
+	for i := 0; i < c.NumWorkers; i++ {
 		wg.Add(1)
 		go encryptWorker(ctx, &wg, gcm, rawChunks, encryptedChunks, errorChan)
 	}
@@ -77,7 +114,7 @@ func (c Cypher) EncryptFile(inputPath string) (*string, error) {
 
 	// Read and send chunks for processing
 	position := 0
-	buffer := make([]byte, ChunkSize)
+	buffer := make([]byte, c.ChunkSize)
 	for {
 		n, err := inputFile.Read(buffer)
 		if err == io.EOF {
@@ -192,7 +229,7 @@ func (c Cypher) DecryptFile(inputPath string) (*string, error) {
 	}
 	defer outputFile.Close()
 
-	block, err := aes.NewCipher(c.Key)
+	block, err := aes.NewCipher(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -206,16 +243,16 @@ func (c Cypher) DecryptFile(inputPath string) (*string, error) {
 	defer cancel()
 
 	// Calculate total size for encrypted chunk (including nonce and overhead)
-	encryptedChunkSize := ChunkSize + gcm.NonceSize() + gcm.Overhead()
+	encryptedChunkSize := c.ChunkSize + gcm.NonceSize() + gcm.Overhead()
 
 	// Create channels
-	encryptedChunks := make(chan DataChunk, NumWorkers)
-	decryptedChunks := make(chan DataChunk, NumWorkers)
+	encryptedChunks := make(chan DataChunk, c.NumWorkers)
+	decryptedChunks := make(chan DataChunk, c.NumWorkers)
 	errorChan := make(chan error, 1)
 
 	// Start the worker pool
 	var wg sync.WaitGroup
-	for i := 0; i < NumWorkers; i++ {
+	for i := 0; i < c.NumWorkers; i++ {
 		wg.Add(1)
 		go decryptWorker(ctx, &wg, gcm, encryptedChunks, decryptedChunks, errorChan)
 	}
@@ -335,7 +372,7 @@ func MD5HashFromString(str string) string {
 }
 
 func (c Cypher) Encrypt(data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(c.Key)
+	block, err := aes.NewCipher(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -349,13 +386,13 @@ func (c Cypher) Encrypt(data []byte) ([]byte, error) {
 	defer cancel()
 
 	// Create channels
-	rawChunks := make(chan DataChunk, NumWorkers)
-	encryptedChunks := make(chan DataChunk, NumWorkers)
+	rawChunks := make(chan DataChunk, c.NumWorkers)
+	encryptedChunks := make(chan DataChunk, c.NumWorkers)
 	errorChan := make(chan error, 1)
 
 	// Start the worker pool
 	var wg sync.WaitGroup
-	for i := 0; i < NumWorkers; i++ {
+	for i := 0; i < c.NumWorkers; i++ {
 		wg.Add(1)
 		go encryptWorker(ctx, &wg, gcm, rawChunks, encryptedChunks, errorChan)
 	}
@@ -372,7 +409,7 @@ func (c Cypher) Encrypt(data []byte) ([]byte, error) {
 		defer close(collectorDone)
 		for chunk := range encryptedChunks {
 			pendingChunks.Store(chunk.position, chunk.data)
-			
+
 			// Try to append chunks in order
 			for {
 				if data, ok := pendingChunks.LoadAndDelete(nextPosition); ok {
@@ -388,8 +425,8 @@ func (c Cypher) Encrypt(data []byte) ([]byte, error) {
 	}()
 
 	// Split data into chunks and send for encryption
-	for i := 0; i < len(data); i += ChunkSize {
-		end := i + ChunkSize
+	for i := 0; i < len(data); i += c.ChunkSize {
+		end := i + c.ChunkSize
 		if end > len(data) {
 			end = len(data)
 		}
@@ -398,7 +435,7 @@ func (c Cypher) Encrypt(data []byte) ([]byte, error) {
 		copy(chunk, data[i:end])
 
 		select {
-		case rawChunks <- DataChunk{data: chunk, position: i / ChunkSize}:
+		case rawChunks <- DataChunk{data: chunk, position: i / c.ChunkSize}:
 		case err := <-errorChan:
 			cancel()
 			return nil, err
@@ -425,7 +462,7 @@ func (c Cypher) Encrypt(data []byte) ([]byte, error) {
 }
 
 func (c Cypher) Decrypt(data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(c.Key)
+	block, err := aes.NewCipher(c.key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
@@ -439,16 +476,16 @@ func (c Cypher) Decrypt(data []byte) ([]byte, error) {
 	defer cancel()
 
 	// Calculate chunk size for encrypted data
-	encryptedChunkSize := ChunkSize + gcm.NonceSize() + gcm.Overhead()
+	encryptedChunkSize := c.ChunkSize + gcm.NonceSize() + gcm.Overhead()
 
 	// Create channels
-	encryptedChunks := make(chan DataChunk, NumWorkers)
-	decryptedChunks := make(chan DataChunk, NumWorkers)
+	encryptedChunks := make(chan DataChunk, c.NumWorkers)
+	decryptedChunks := make(chan DataChunk, c.NumWorkers)
 	errorChan := make(chan error, 1)
 
 	// Start the worker pool
 	var wg sync.WaitGroup
-	for i := 0; i < NumWorkers; i++ {
+	for i := 0; i < c.NumWorkers; i++ {
 		wg.Add(1)
 		go decryptWorker(ctx, &wg, gcm, encryptedChunks, decryptedChunks, errorChan)
 	}
@@ -465,7 +502,7 @@ func (c Cypher) Decrypt(data []byte) ([]byte, error) {
 		defer close(collectorDone)
 		for chunk := range decryptedChunks {
 			pendingChunks.Store(chunk.position, chunk.data)
-			
+
 			// Try to append chunks in order
 			for {
 				if data, ok := pendingChunks.LoadAndDelete(nextPosition); ok {

@@ -16,6 +16,7 @@ func main() {
 
 	// Encrypt and decrypt data
 	c := cypher.NewCypher("my-secret-key")
+	fmt.Printf("Cypher: %v\n", c)
 
 	// Encrypt data
 	encrypted, err := c.Encrypt([]byte("your data"))
@@ -28,17 +29,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	
+
 	if string(decrypted) == "your data" {
 		fmt.Println("Success: Encrypted and decrypted data match!")
 	} else {
 		fmt.Println("Error: Encrypted and decrypted data do not match!")
 	}
 
-
 	inputFile := "./data/file.txt"
-
-
 
 	// Get original file hash
 	inputHash, err := cypher.MD5HashFromFile(inputFile)
