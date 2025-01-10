@@ -46,7 +46,7 @@ fmt.Printf("File decrypted successfully: %s\n", *decryptedPath)
 Encrypt Data:
 ```
 data := []byte("Sensitive information")
-encryptedData, err := x.Encrypt(data)
+encryptedData, err := c.Encrypt(data)
 if err != nil {
     log.Fatalf("Data encryption failed: %v", err)
 }
